@@ -1,5 +1,6 @@
 package com.edifika.iam.authentication.application.internal.eventhandlers;
 
+import com.edifika.iam.authentication.application.internal.seeding.DefaultUsersSeeder;
 import com.edifika.iam.authentication.domain.model.commands.SeedRolesCommand;
 
 import com.edifika.iam.authentication.domain.services.RoleCommandService;
@@ -12,16 +13,18 @@ import java.sql.Timestamp;
 
 /**
  * Manejador de eventos que se ejecuta al iniciar la aplicación.
- * Inicializa los roles por defecto en la base de datos.
+ * Inicializa los roles y los usuarios por defecto (administrador y propietario).
  */
 @Service
 public class ApplicationReadyEventHandler {
 
     private final RoleCommandService roleCommandService;
+    private final DefaultUsersSeeder defaultUsersSeeder;
     private static final Logger LOGGER = LoggerFactory.getLogger(ApplicationReadyEventHandler.class);
 
-    public ApplicationReadyEventHandler(RoleCommandService roleCommandService) {
+    public ApplicationReadyEventHandler(RoleCommandService roleCommandService, DefaultUsersSeeder defaultUsersSeeder) {
         this.roleCommandService = roleCommandService;
+        this.defaultUsersSeeder = defaultUsersSeeder;
     }
 
     @EventListener
@@ -30,6 +33,7 @@ public class ApplicationReadyEventHandler {
         LOGGER.info("Verificando si se necesita inicializar roles para {} en {}", applicationName, currentTimestamp());
         roleCommandService.handle(new SeedRolesCommand());
         LOGGER.info("Roles inicializados correctamente para {} en {}", applicationName, currentTimestamp());
+        defaultUsersSeeder.seed();
     }
 
     private Timestamp currentTimestamp() {
