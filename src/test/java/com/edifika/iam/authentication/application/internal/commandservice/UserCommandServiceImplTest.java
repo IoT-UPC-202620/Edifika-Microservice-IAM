@@ -121,6 +121,30 @@ class UserCommandServiceImplTest {
     }
 
     @Test
+    void handleSignUpWithDuplicateEmailThrowsAndDoesNotCreateUser() {
+
+        when(userRepository.existsByEmail("admin@test.com"))
+                .thenReturn(true);
+
+        var command = new SignUpCommand(
+                "Admin User",
+                "admin@test.com",
+                "N9S8-8777",
+                "999999999",
+                DocumentType.DNI,
+                "12345678",
+                List.of(adminRole)
+        );
+
+        var exception = assertThrows(IllegalArgumentException.class,
+                () -> userCommandService.handle(command));
+
+        assertEquals("El correo ya está registrado", exception.getMessage());
+
+        verify(userRepository, never()).save(any(User.class));
+    }
+
+    @Test
     void handleUpdateUserSuccessfully() {
 
         var user = mock(User.class);

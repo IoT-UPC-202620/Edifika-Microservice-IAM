@@ -61,7 +61,7 @@ public class UserCommandServiceImpl implements UserCommandService {
     @Override
     public Optional<User> handle(SignUpCommand signUpCommand) {
         if (userRepository.existsByEmail(signUpCommand.email()))
-            throw new IllegalArgumentException("El email " + signUpCommand.email() + " ya está registrado");
+            throw new IllegalArgumentException("El correo ya está registrado");
 
         if (userRepository.existsByDocumentNumber(signUpCommand.documentNumber()))
             throw new IllegalArgumentException("El número de documento " + signUpCommand.documentNumber() + " ya está registrado");
