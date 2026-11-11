@@ -1,5 +1,6 @@
 package com.edifika.iam.authentication.application.internal.services;
 
+import com.edifika.iam.authentication.domain.model.aggregates.User;
 import com.edifika.iam.authentication.domain.model.commands.SignUpCommand;
 import com.edifika.iam.authentication.domain.model.entities.Role;
 import com.edifika.iam.authentication.domain.model.valueobjects.DocumentType;
@@ -19,12 +20,18 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.security.SecureRandom;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
  * Provisiona el usuario OWNER de un residente vinculado a una unidad.
- * Idempotente por email: si el usuario ya existe, se re-publica el evento de retorno
- * (el link en Residential pudo no completarse tras un reintento) sin recrear ni re-enviar correo.
+ * Idempotente por email: si el usuario ya existe, se publica el retorno REJECTED
+ * (EMAIL_ALREADY_REGISTERED, idUser=null) para que Residential marque el vínculo
+ * FAILED con motivo, sin recrear ni re-enviar correo.
+ *
+ * <p>Sin efectos laterales dentro de la transacción: el envío SMTP y la publicación
+ * del evento de retorno ocurren en {@code afterCommit} (o de inmediato si no hay
+ * sincronización de transacción activa, p. ej. en tests unitarios).
  */
 @Service
 public class ResidentProvisioningService {
@@ -58,56 +65,90 @@ public class ResidentProvisioningService {
 
         var existing = userRepository.findByEmail(email);
         if (existing.isPresent()) {
-            log.warn("El correo ya está registrado ({}). No se crea usuario; se re-publica el evento de retorno.", email);
-            publishUserCreatedAfterCommit(email, event.unitId(), existing.get().getId());
+            log.warn("El correo ya está registrado ({}). No se crea usuario; se publica el retorno REJECTED.", email);
+            registerAfterCommit(ResidentUserCreatedEvent.rejectedDuplicateEmail(email, event.unitId(), UUID.randomUUID().toString()),
+                    null);
             return;
         }
 
         var temporaryPassword = generateTemporaryPassword(event.fullName(), email);
         var documentType = parseDocumentType(event.documentType());
 
-        var user = userCommandService.handle(new SignUpCommand(
-                event.fullName(),
-                email,
-                temporaryPassword,
-                event.phone(),
-                documentType,
-                event.documentNumber(),
-                List.of(new Role(Roles.OWNER))
-        )).orElseThrow(() -> new IllegalStateException("No se pudo crear el usuario residente"));
+        Optional<User> created;
+        try {
+            // handle(SignUpCommand) ya persiste el User (userRepository.save); el agregado
+            // devuelto es una entidad gestionada en este mismo persistence context, así que
+            // activate() se propaga al commit por dirty checking. No hay segundo save.
+            created = userCommandService.handle(new SignUpCommand(
+                    event.fullName(),
+                    email,
+                    temporaryPassword,
+                    event.phone(),
+                    documentType,
+                    event.documentNumber(),
+                    List.of(new Role(Roles.OWNER))
+            ));
+        } catch (IllegalArgumentException e) {
+            // Carrera: el correo se registró entre el pre-chequeo de arriba (o el pre-chequeo
+            // Residential→IAM) y la creación. Si el usuario ya existe, es un duplicado de email:
+            // publica REJECTED sin relanzar (la transacción confirma sin usuario y el afterCommit lo publica).
+            // Si no existe, el fallo es otro (p. ej. rol OWNER ausente o documento duplicado) y debe ir a retry → DLQ.
+            if (userRepository.findByEmail(email).isPresent()) {
+                log.warn("El correo {} quedó registrado durante la provisión; se publica el retorno REJECTED.", email);
+                registerAfterCommit(ResidentUserCreatedEvent.rejectedDuplicateEmail(email, event.unitId(), UUID.randomUUID().toString()),
+                        null);
+                return;
+            }
+            throw e;
+        }
+        var user = created.orElseThrow(() -> new IllegalStateException("No se pudo crear el usuario residente"));
 
         user.activate();
-        userRepository.save(user);
         log.info("Usuario OWNER creado para residente {} (id={})", email, user.getId());
 
-        credentialsMailService.sendCredentials(email, event.fullName(), temporaryPassword);
-
-        publishUserCreatedAfterCommit(email, event.unitId(), user.getId());
+        registerAfterCommit(ResidentUserCreatedEvent.created(email, event.unitId(), user.getId(), UUID.randomUUID().toString()),
+                new CredentialsMailRequest(email, event.fullName(), temporaryPassword));
     }
 
-    /** Publica tras el commit para que Residential nunca vea un usuario inexistente o ausente. */
-    private void publishUserCreatedAfterCommit(String email, Long unitId, Long idUser) {
+    /**
+     * Registra mail (si aplica) + publicación del evento de retorno en un único afterCommit:
+     * el correo solo parte cuando el usuario ya quedó persistido y la publicación del
+     * retorno también va después del commit. Sin sincronización activa (tests unitarios),
+     * ambos se ejecutan de inmediato.
+     */
+    private void registerAfterCommit(ResidentUserCreatedEvent userCreated,
+                                     CredentialsMailRequest mail) {
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            publishUserCreated(email, unitId, idUser);
+            runAfterCommit(userCreated, mail);
             return;
         }
-        var userCreated = new ResidentUserCreatedEvent(UUID.randomUUID().toString(), email, unitId, idUser);
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                publishUserCreated(userCreated);
+                runAfterCommit(userCreated, mail);
             }
         });
     }
 
-    private void publishUserCreated(String email, Long unitId, Long idUser) {
-        publishUserCreated(new ResidentUserCreatedEvent(UUID.randomUUID().toString(), email, unitId, idUser));
+    private void runAfterCommit(ResidentUserCreatedEvent userCreated, CredentialsMailRequest mail) {
+        if (mail != null) {
+            try {
+                credentialsMailService.sendCredentials(mail.to(), mail.fullName(), mail.temporaryPassword());
+            } catch (Exception e) {
+                // El correo es post-commit best effort; el vínculo no debe quedarse sin retorno por un fallo SMTP.
+                log.error("No se pudo enviar el correo de credenciales a {}: {}", mail.to(), e.getMessage());
+            }
+        }
+        publishUserCreated(userCreated);
     }
 
     private void publishUserCreated(ResidentUserCreatedEvent userCreated) {
         rabbitTemplate.convertAndSend(USER_CREATED_EXCHANGE, USER_CREATED_ROUTING_KEY, userCreated);
-        log.info("Publicado {} (email={}, unitId={}, idUser={})", USER_CREATED_ROUTING_KEY,
-                userCreated.email(), userCreated.unitId(), userCreated.idUser());
+        log.info("Publicado {} (email={}, unitId={}, idUser={}, status={}, reason={})", USER_CREATED_ROUTING_KEY,
+                userCreated.email(), userCreated.unitId(), userCreated.idUser(), userCreated.status(), userCreated.reason());
+    }
+
+    private record CredentialsMailRequest(String to, String fullName, String temporaryPassword) {
     }
 
     private DocumentType parseDocumentType(String value) {
