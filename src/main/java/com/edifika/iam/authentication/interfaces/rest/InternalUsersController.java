@@ -60,6 +60,25 @@ public class InternalUsersController {
         return ResponseEntity.ok(Map.of("exists", userRepository.existsByEmail(normalized)));
     }
 
+    /**
+     * Datos minimos de un usuario para Residential (asignacion a unidad): id, email, nombre y roles.
+     */
+    @GetMapping("/{id}")
+    public ResponseEntity<Map<String, Object>> getUser(
+            @org.springframework.web.bind.annotation.PathVariable("id") Long id,
+            @RequestHeader(value = INTERNAL_TOKEN_HEADER, required = false) String token) {
+        if (!tokenMatches(token)) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("message", "No autorizado"));
+        }
+        return userRepository.findById(id)
+                .<ResponseEntity<Map<String, Object>>>map(user -> ResponseEntity.ok(Map.of(
+                        "id", user.getId(),
+                        "email", user.getEmail(),
+                        "fullName", user.getFullName(),
+                        "roles", user.getRoles().stream().map(r -> r.getName().name()).toList())))
+                .orElseGet(() -> ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("message", "Usuario no encontrado")));
+    }
+
     private boolean tokenMatches(String candidate) {
         if (candidate == null) {
             return false;
