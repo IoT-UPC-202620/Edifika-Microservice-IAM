@@ -1,5 +1,6 @@
 package com.edifika.iam.authentication.interfaces.rest;
 
+import com.edifika.iam.authentication.domain.model.valueobjects.Roles;
 import com.edifika.iam.authentication.domain.services.UserCommandService;
 import com.edifika.iam.authentication.infrastructure.persistence.jpa.repositories.RoleRepository;
 import com.edifika.iam.authentication.interfaces.rest.resources.AuthenticatedUserResource;
@@ -17,6 +18,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
 
 /**
  * Controlador REST para autenticación de usuarios.
@@ -40,8 +43,13 @@ public class AuthenticationController {
     @PostMapping("/sign-up")
     public ResponseEntity<?> signUp(@RequestBody SignUpResource resource) {
         try {
+            // Registro publico web: el usuario creado siempre es ADMIN; el rol del request se ignora.
+            // Los residentes (OWNER/TENANT) los crea un ADMIN con POST /api/v1/users/residents.
+            var adminOnly = new SignUpResource(resource.fullName(), resource.email(), resource.password(),
+                    resource.phone(), resource.documentType(), resource.documentNumber(),
+                    List.of(Roles.ADMIN.name()));
             var command = SignUpCommandFromResourceAssembler
-                    .toCommandFromResource(resource, roleRepository);
+                    .toCommandFromResource(adminOnly, roleRepository);
             var user = userCommandService.handle(command);
             if (user.isEmpty()) {
                 LOGGER.warn("Sign up fallido para el email: {}", resource.email());
