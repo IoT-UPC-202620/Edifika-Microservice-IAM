@@ -18,7 +18,6 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
-import java.security.SecureRandom;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -40,23 +39,23 @@ public class ResidentProvisioningService {
     public static final String USER_CREATED_ROUTING_KEY = "iam.resident.user-created";
 
     private static final Logger log = LoggerFactory.getLogger(ResidentProvisioningService.class);
-    private static final String PASSWORD_ALPHABET =
-            "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
 
     private final UserCommandService userCommandService;
     private final UserRepository userRepository;
     private final CredentialsMailService credentialsMailService;
     private final RabbitTemplate rabbitTemplate;
-    private final SecureRandom random = new SecureRandom();
+    private final TemporaryPasswordGenerator passwordGenerator;
 
     public ResidentProvisioningService(UserCommandService userCommandService,
                                        UserRepository userRepository,
                                        CredentialsMailService credentialsMailService,
-                                       RabbitTemplate rabbitTemplate) {
+                                       RabbitTemplate rabbitTemplate,
+                                       TemporaryPasswordGenerator passwordGenerator) {
         this.userCommandService = userCommandService;
         this.userRepository = userRepository;
         this.credentialsMailService = credentialsMailService;
         this.rabbitTemplate = rabbitTemplate;
+        this.passwordGenerator = passwordGenerator;
     }
 
     @Transactional
@@ -71,7 +70,7 @@ public class ResidentProvisioningService {
             return;
         }
 
-        var temporaryPassword = generateTemporaryPassword(event.fullName(), email);
+        var temporaryPassword = passwordGenerator.generate(event.fullName(), email);
         var documentType = parseDocumentType(event.documentType());
 
         Optional<User> created;
@@ -161,25 +160,5 @@ public class ResidentProvisioningService {
             log.warn("documentType desconocido '{}'; se usa DNI", value);
             return DocumentType.DNI;
         }
-    }
-
-    private String generateTemporaryPassword(String fullName, String email) {
-        // Política SignUpCommand: >=8, una mayúscula, un símbolo, sin nombre ni parte del email.
-        var firstName = fullName == null ? "" : fullName.trim().split(" ")[0].toLowerCase();
-        var emailLocal = email.split("@")[0].toLowerCase();
-        for (int attempt = 0; attempt < 20; attempt++) {
-            var sb = new StringBuilder();
-            sb.append("ABCDEFGHJKLMNPQRSTUVWXYZ".charAt(random.nextInt(24))); // asegura mayúscula
-            for (int i = 0; i < 8; i++) {
-                sb.append(PASSWORD_ALPHABET.charAt(random.nextInt(PASSWORD_ALPHABET.length())));
-            }
-            sb.append("!").append(random.nextInt(10)); // asegura símbolo y dígito
-            var candidate = sb.toString();
-            var lower = candidate.toLowerCase();
-            if (!lower.contains(firstName) && !lower.contains(emailLocal)) {
-                return candidate;
-            }
-        }
-        return "Edifika" + UUID.randomUUID().toString().replace("-", "").substring(0, 6) + "!7";
     }
 }
